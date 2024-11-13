@@ -80,7 +80,7 @@ class G4CMDStruct(ct.Structure):
     Structure used for the 'g4_set_query' to set/ read many configurations at once
 
     :Attributes:
-    - id:     command to perform from COMMANDS
+    - cmd:    command to perform from COMMANDS
     - cds:    specification of the sensor or extra parameters needed for the command
     """
     _fields_ = [("cmd", ct.c_uint),
@@ -92,7 +92,7 @@ class G4CMDBlockStruct(ct.Structure):
     Structure used for the 'g4_set_query' to set/ read many configurations at once
 
     :Attributes:
-    - units:            array with the units for the position and orientation from enum PosOri
+    - units:            array with the units for the position and orientation from enum UNITS
     - version_info:     system version
     - filter_params:    takes the filter values (get and set possible)
     - increment:        array with an element for the position and the orientation (per sensor)
@@ -115,10 +115,10 @@ class G4SystemInfo(ct.Structure):
 
     :Attributes:
     - G4TrackVer:       Version of the G4Track.dll
-    - hw_ser_n:         ?
-    - rf_fw_pn:         ?
-    - dsp_bt_fw_pn:     ?
-    - dsp_app_fw_pn:    ?
+    - hw_ser_n:         serial number of the hub
+    - rf_fw_pn:         Radio Frequency Firmware Part Number?
+    - dsp_bt_fw_pn:     Digital Signal Processor Bluetooth Firmware Part Number?
+    - dsp_app_fw_pn:    Digital Signal Processor Application Firmware Part Number?
     """
     _fields_ = [("G4TrackVer", ct.c_char * 64),
                 ("hw_ser_no", ct.c_char * 16),
@@ -182,8 +182,8 @@ class ACTION(Enum):
     Actions as specified by Polhemus
     """
     G4_ACTION_SET = 0
-    G4_ACTION_GET = 0
-    G4_ACTION_RESET = 0
+    G4_ACTION_GET = 1
+    G4_ACTION_RESET = 2
 
 
 class DATATYPE(Enum):
@@ -194,7 +194,7 @@ class DATATYPE(Enum):
     G4_DATA_ORI = 1
 
 
-class POSORI(Enum):
+class UNITS(Enum):
     """
     Type of translation and orientation as specified by Polhemus
     """
@@ -226,14 +226,14 @@ G4Track.g4_set_query.restype = ct.c_uint32
 
 
 def initialize_system(src_cfg_file):
-    '''
+    """
     Initialize the G4Track Libray. It must be called before any interaction using this library.
     :param src_cfg_file: source configuration file (.g4c)
     :type src_cfg_file: str
     :returns: a boolean which is True if the system is initialized (otherwise False) and the sytem id (if
         there is a connection available, otherwise None)
     :rtype: (bool, int)
-    '''
+    """
 
     G4Track = ct.CDLL(os.path.join(file_directory, "G4Track.dll"))
 
@@ -241,7 +241,7 @@ def initialize_system(src_cfg_file):
     status = G4Track.g4_init_sys(ct.byref(dongle_id_c), src_cfg_file.encode('utf-8'), ct.c_void_p(None))
 
     # numbers are still unsigned --> convert to signed by substracting 2^32 or 0x100000000
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -291,7 +291,7 @@ def create_id(sys=-1, hub=0, sensor=0):
     """
     Create an id of the given input, needed for the Commands ('set_query'), no parameters needed
     (id for all sensors and systems that are available)
-    :param sys: id of the system
+    :param sys: id of the system, given with the funtion initialize_system (start with 1)
     :param hub: id of the hub
     :param sensor: id of the sensor
     :return: -1 if no parameters where given, otherwise a combination of the given parameters
@@ -299,7 +299,8 @@ def create_id(sys=-1, hub=0, sensor=0):
     """
     if sys == -1:
         return -1
-    return ((sys << 24) & 0xFF000000) | ((hub << 8) & 0x0FFF00) | (sensor & 0x7F)
+
+    return ((sys << 24) & 0xff000000) | ((hub << 8) & 0x0fff00) | (sensor & 0x7f)
 
 
 def create_id_sensormap(sys, hub, sensormap):
@@ -317,10 +318,28 @@ def create_id_sensormap(sys, hub, sensormap):
     return create_id(sys, hub, sensormap) | 0x80
 
 
-def who_am_i(sys_id=-1, hub_id=0, sensor_id=0):
+def id_to_sensormap(sens_id):
     """
-    Function to get the system information for all sensors (no attributes) or a specific one
-    :param sys_id: id of the system
+    Convert a tuple of all sensor ids to a sensormap
+    :param sens_id: a tuple containing all sensor ids
+    :type sens_id: tuple[int]
+    :return: sensormap
+    :rtype: int
+    """
+    map = 0
+    if 0 in sens_id:
+        map += 1 << 2
+    if 1 in sens_id:
+        map += 1 << 2
+    if 2 in sens_id:
+        map += 1
+    return map
+
+
+def who_am_i(sys_id, hub_id=0, sensor_id=0):
+    """
+    Function to get the system information for a specific sensor of a hub
+    :param sys_id: id of the system (result of the function initialize_system)
     :param hub_id: id of the hub
     :param sensor_id: id of the sensor
     :return: a struct of G4SystemInfo with the information of the system
@@ -335,7 +354,7 @@ def who_am_i(sys_id=-1, hub_id=0, sensor_id=0):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 1:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -356,7 +375,7 @@ def get_max_sources():
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -386,9 +405,8 @@ def boresight(sys_id, hub_id, sen_id, pos_init=None):
         sen_id = sen_id[0]
         cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
     else:
-        sen_map = (sen_id[0] << 2) | (sen_id[1] << 1) | sen_id[2]
-        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, sen_map)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_EULER_DEGREE.value
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_EULER_DEGREE.value
 
     if pos_init is None:
         pos = (ct.c_int * 3)()
@@ -401,12 +419,12 @@ def boresight(sys_id, hub_id, sen_id, pos_init=None):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
         if pos_init is None:
-            return pos
+            return list(pos)
         else:
             return True
     else:
@@ -433,15 +451,14 @@ def boresight_reset(sys_id=-1, hub_id=0, sen_id=(0,)):
         sen_id = sen_id[0]
         cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
     else:
-        sen_map = (sen_id[0] << 2) | (sen_id[1] << 1) | sen_id[2]
-        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, sen_map)
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
 
     cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_EULER_DEGREE.value
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_EULER_DEGREE.value
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -475,7 +492,7 @@ def filter(sys_id, hub_id, return_pos=True, filter_coef_init=None):
         cmd_struct.cds.iParam = DATATYPE.G4_DATA_ORI.value
 
     if filter_coef_init is None:
-        filter_coef  = (ct.c_float * 4)()
+        filter_coef = (ct.c_float * 4)()
         cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
     else:
         filter_coef = (ct.c_float * 4)(*filter_coef_init)
@@ -485,12 +502,12 @@ def filter(sys_id, hub_id, return_pos=True, filter_coef_init=None):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
         if filter_coef_init is None:
-            return filter_coef
+            return list(filter_coef)
         else:
             return True
     else:
@@ -522,7 +539,7 @@ def filter_reset(sys_id, hub_id, return_pos=True):
     cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -532,17 +549,62 @@ def filter_reset(sys_id, hub_id, return_pos=True):
         return False
 
 
-def increment(sys_id, hub_id, sen_id, pos_init=None):
+def increment(sys_id, hub_id, sen_id, posori_init=None):
     """
-    Set or get the boresight of all sensors (sys_id = -1, only set) or a particular one
+    Set or get the position and orientation increment of all sensors (sys_id = -1, only set) or a particular one
     :param sys_id: system id (-1 if all sensors are intended, only to set)
     :type sys_id: int
     :param hub_id: hub id (0 if all sensors are intended, only to set)
     :type hub_id: int
     :param sen_id: sensor id ((0,) if all sensors are intended, only to set)
     :type sen_id: tuple[int]
-    :param pos_init: the position to set the boresight to (None to get the position)
-    :type pos_init: tuple[float, float, float]
+    :param posori_init: the increment to set the increment to (None to get), a negative value turns auto-increment on
+    :type posori_init: tuple[float, float]
+    :return: the position if there was no position given, otherwise the status
+    """
+    cmd_struct = G4CMDStruct()
+    cmd_struct.cmd = COMMANDS.G4_CMD_INCREMENT.value
+
+    if len(sen_id) == 1:
+        sen_id = sen_id[0]
+        cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
+    else:
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value << 16 | UNITS.G4_TYPE_EULER_DEGREE.value
+
+    if posori_init is None:
+        posori = (ct.c_float * 2)()
+        cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
+    else:
+        posori = (ct.c_float * 2)(*posori_init)
+        cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
+
+    cmd_struct.cds.pParam = ct.cast(ct.byref(posori), ct.c_void_p)
+
+    status = G4Track.g4_set_query(ct.byref(cmd_struct))
+
+    if status > 0:
+        status = status - 0x100000000
+
+    if status == ERROR.G4_ERROR_NONE.value:
+        if posori_init is None:
+            return list(posori)
+        else:
+            return True
+    else:
+        print(f"Error: Unexpected status code {ERROR(status).name}.")
+        return False
+
+
+def increment_reset(sys_id=-1, hub_id=0, sen_id=(0,)):
+    """
+    Reset the position and orientation increment of all sensors (sys_id = -1, only set) or a particular one
+    :param sys_id: system id (-1 if all sensors are intended, only to set)
+    :type sys_id: int
+    :param hub_id: hub id (0 if all sensors are intended, only to set)
+    :type hub_id: int
+    :param sen_id: sensor id ((0,) if all sensors are intended, only to set)
+    :type sen_id: tuple[int]
     :return: the position if there was no position given, otherwise the status
     """
     cmd_struct = G4CMDStruct()
@@ -552,29 +614,16 @@ def increment(sys_id, hub_id, sen_id, pos_init=None):
         sen_id = sen_id[0]
         cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
     else:
-        sen_map = (sen_id[0] << 2) | (sen_id[1] << 1) | sen_id[2]
-        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, sen_map)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_EULER_DEGREE.value
-
-    if pos_init is None:
-        pos = (ct.c_int * 3)()
-        cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
-    else:
-        pos = (ct.c_int * 3)(*pos_init)
-        cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
-
-    cmd_struct.cds.pParam = ct.cast(ct.byref(pos), ct.c_void_p)
-
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value << 16 | UNITS.G4_TYPE_EULER_DEGREE.value
+    cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
-        if pos_init is None:
-            return pos
-        else:
-            return True
+        return True
     else:
         print(f"Error: Unexpected status code {ERROR(status).name}.")
         return False
@@ -592,24 +641,24 @@ def frame_reference_orientation(sys_id, degree_init=None):
     cmd_struct = G4CMDStruct()
     cmd_struct.cmd = COMMANDS.G4_CMD_FOR_ROTATE.value
     cmd_struct.cds.id = create_id(sys_id)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_EULER_DEGREE.value
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_EULER_DEGREE.value
 
     if degree_init is None:
-        degree = (ct.c_int * 3)()
+        degree = (ct.c_float * 3)()
         cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
     else:
-        degree = (ct.c_int * 3)(*degree_init)
+        degree = (ct.c_float * 3)(*degree_init)
         cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
 
     cmd_struct.cds.pParam = ct.cast(ct.byref(degree), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
         if degree_init is None:
-            return degree
+            return list(degree)
         else:
             return True
     else:
@@ -627,11 +676,11 @@ def frame_reference_orientation_reset(sys_id):
     cmd_struct = G4CMDStruct()
     cmd_struct.cmd = COMMANDS.G4_CMD_FOR_ROTATE.value
     cmd_struct.cds.id = create_id(sys_id)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_EULER_DEGREE.value
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_EULER_DEGREE.value
     cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -653,24 +702,24 @@ def frame_reference_translation(sys_id, pos_init=None):
     cmd_struct = G4CMDStruct()
     cmd_struct.cmd = COMMANDS.G4_CMD_FOR_TRANSLATE.value
     cmd_struct.cds.id = create_id(sys_id)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_CM.value
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value
 
     if pos_init is None:
-        pos = (ct.c_int * 3)()
+        pos = (ct.c_float * 3)()
         cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
     else:
-        pos = (ct.c_int * 3)(*pos_init)
+        pos = (ct.c_float * 3)(*pos_init)
         cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
 
     cmd_struct.cds.pParam = ct.cast(ct.byref(pos), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
         if pos_init is None:
-            return pos
+            return list(pos)
         else:
             return True
     else:
@@ -688,11 +737,11 @@ def frame_reference_translation_reset(sys_id):
     cmd_struct = G4CMDStruct()
     cmd_struct.cmd = COMMANDS.G4_CMD_FOR_TRANSLATE.value
     cmd_struct.cds.id = create_id(sys_id)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_CM.value
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value
     cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -722,15 +771,14 @@ def tip_offsets(sys_id, hub_id, sen_id, tof_init=None):
         sen_id = sen_id[0]
         cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
     else:
-        sen_map = (sen_id[0] << 2) | (sen_id[1] << 1) | sen_id[2]
-        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, sen_map)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_CM.value
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value
 
     if tof_init is None:
-        tof = (ct.c_int * 3)()
+        tof = (ct.c_float * 3)()
         cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
     else:
-        tof = (ct.c_int * 3)(*tof_init)
+        tof = (ct.c_float * 3)(*tof_init)
         cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
 
     cmd_struct.cds.pParam = ct.cast(ct.byref(tof), ct.c_void_p)
@@ -741,7 +789,7 @@ def tip_offsets(sys_id, hub_id, sen_id, tof_init=None):
 
     if status == ERROR.G4_ERROR_NONE.value:
         if tof_init is None:
-            return tof
+            return list(tof)
         else:
             return True
     else:
@@ -768,13 +816,12 @@ def tip_offsets_reset(sys_id, hub_id, sen_id):
         sen_id = sen_id[0]
         cmd_struct.cds.id = create_id(sys_id, hub_id, sen_id)
     else:
-        sen_map = (sen_id[0] << 2) | (sen_id[1] << 1) | sen_id[2]
-        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, sen_map)
-    cmd_struct.cds.iParam = POSORI.G4_TYPE_CM.value
+        cmd_struct.cds.id = create_id_sensormap(sys_id, hub_id, id_to_sensormap(sen_id))
+    cmd_struct.cds.iParam = UNITS.G4_TYPE_CM.value
     cmd_struct.cds.action = ACTION.G4_ACTION_RESET.value
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -797,10 +844,10 @@ def set_units(sys_id):
     cmd_struct.cds.id = create_id(sys_id, 0, 0)
     cmd_struct.cds.action = ACTION.G4_ACTION_SET.value
     cmd_struct.cds.iParam = DATATYPE.G4_DATA_ORI.value
-    cmd_struct.cds.pParam = ct.cast(ct.pointer(ct.c_int(POSORI.G4_TYPE_EULER_DEGREE.value)), ct.c_void_p)
+    cmd_struct.cds.pParam = ct.cast(ct.pointer(ct.c_int(UNITS.G4_TYPE_EULER_DEGREE.value)), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status != ERROR.G4_ERROR_NONE.value:
@@ -808,10 +855,10 @@ def set_units(sys_id):
         return False
 
     cmd_struct.cds.iParam = DATATYPE.G4_DATA_POS.value
-    cmd_struct.cds.pParam = ct.cast(ct.pointer(ct.c_int(POSORI.G4_TYPE_CM.value)), ct.c_void_p)
+    cmd_struct.cds.pParam = ct.cast(ct.pointer(ct.c_int(UNITS.G4_TYPE_CM.value)), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -821,11 +868,13 @@ def set_units(sys_id):
         return None
 
 
-def get_units(sys_id):
+def get_units(sys_id, hub_id):
     """
     Get the units of the given system-id (orientation & translation)
     :param sys_id: system id
     :type sys_id: int
+    :param hub_id: hub id
+    :type hub_id: int
     :return: a tuple with the units of the orientation and translation
     :rtype: tuple[DATATYPE, DATATYPE]
     """
@@ -834,13 +883,15 @@ def get_units(sys_id):
 
     cmd_struct = G4CMDStruct()
     cmd_struct.cmd = COMMANDS.G4_CMD_UNITS.value
-    cmd_struct.cds.id = create_id(sys_id, 0, 0)
+    cmd_struct.cds.id = create_id(sys_id, hub_id, 0)
     cmd_struct.cds.action = ACTION.G4_ACTION_GET.value
     cmd_struct.cds.iParam = DATATYPE.G4_DATA_ORI.value
-    cmd_struct.cds.pParam = ct.cast(ct.byref(ct.c_uint(res_ori)), ct.c_void_p)
+    res_ori_value = ct.c_uint(res_ori)
+    cmd_struct.cds.pParam = ct.cast(ct.byref(res_ori_value), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
+    res_ori = res_ori_value.value
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status != ERROR.G4_ERROR_NONE.value:
@@ -848,11 +899,13 @@ def get_units(sys_id):
         return None
 
     cmd_struct.cds.iParam = DATATYPE.G4_DATA_POS.value
-    cmd_struct.cds.pParam = ct.cast(ct.byref(ct.c_uint(res_pos)), ct.c_void_p)
+    res_pos_value = ct.c_uint(res_pos)
+    cmd_struct.cds.pParam = ct.cast(ct.byref(res_pos_value), ct.c_void_p)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
+    res_pos = res_pos_value.value
 
     if status == ERROR.G4_ERROR_NONE.value:
-        return DATATYPE(res_ori).name, DATATYPE(res_pos).name
+        return UNITS(res_ori).name, UNITS(res_pos).name
     else:
         print(f"Error: Unexpected status code {ERROR(status).name}.")
         return None
@@ -875,7 +928,7 @@ def get_active_hubs(sys_id, id_needed=False):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status != ERROR.G4_ERROR_NONE.value:
@@ -884,15 +937,18 @@ def get_active_hubs(sys_id, id_needed=False):
 
     if id_needed:
         hub_ids = (ct.c_int * cmd_struct.cds.iParam)()
-        cmd_struct.cds.pParam = hub_ids
+        cmd_struct.cds.pParam = ct.cast(ct.byref(hub_ids), ct.c_void_p)
 
         status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-        if status > 0x7FFFFFFF:
+        if status > 0:
             status = status - 0x100000000
 
         if status == ERROR.G4_ERROR_NONE.value:
-            return cmd_struct.cds.pParam
+            for i in range(cmd_struct.cds.iParam):
+                hub_ids[i] = i
+
+            return list(hub_ids)
         else:
             print(f"Error: Unexpected status code {ERROR(status).name}.")
             return None
@@ -916,12 +972,12 @@ def get_station_map(sys_id, hub_id):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
-        bits = f"{cmd_struct.cds.iParam.value:03b}"
-        return tuple(bit=='1' for bit in bits)
+        bits = format(cmd_struct.cds.iParam, f'{3}b')
+        return tuple(bit == '1' for bit in bits)[::-1]
     else:
         print(f"Error: Unexpected status code {ERROR(status).name}.")
         return None
@@ -941,20 +997,20 @@ def get_source_map(sys_id):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
     if status != ERROR.G4_ERROR_NONE.value:
         print(f"Error: Unexpected status code {ERROR(status).name}.")
         return False
 
-    source_map = G4SRCMAP[cmd_struct.cds.iParam]
+    source_map = (G4SRCMAP() * cmd_struct.cds.iParam)()
 
-    cmd_struct.cds.pParam = source_map
-    cmd_struct.cds.iParam = ((POSORI.G4_TYPE_INCH.value << 16) | POSORI.G4_TYPE_EULER_DEGREE.value)
+    cmd_struct.cds.pParam = ct.cast(ct.byref(source_map), ct.c_void_p)
+    cmd_struct.cds.iParam = ((UNITS.G4_TYPE_INCH.value << 16) | UNITS.G4_TYPE_EULER_DEGREE.value)
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -978,7 +1034,7 @@ def restore_default(sys_id=-1):
 
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
@@ -990,7 +1046,7 @@ def restore_default(sys_id=-1):
 
 def block_read_write(sys_id, hub_id, action):
     """
-    NOT finished (only get): Read, write or reset multiple configuration of a given hub
+    (Not finished) Read, write or reset multiple configuration of a given hub
     :param sys_id: system id
     :type sys_id: int
     :param hub_id: hub id
@@ -1006,23 +1062,24 @@ def block_read_write(sys_id, hub_id, action):
 
     res = G4CMDBlockStruct()
     if action.lower() == 'set':
-        cmd_struct.action = ct.c_int(ACTION.G4_ACTION_SET.value)
-        res.units = (ct.c_uint * 2)(*[POSORI.G4_TYPE_CM.value, POSORI.G4_TYPE_EULER_DEGREE.value])
+        cmd_struct.action = ACTION.G4_ACTION_SET.value
+        res.units = (ct.c_uint * 2)(*[UNITS.G4_TYPE_CM.value, UNITS.G4_TYPE_EULER_DEGREE.value])
+        # set all parameters here, still need to experiment with all
         cmd_struct.cds.pParam = ct.cast(ct.byref(res), ct.c_void_p)
     elif action.lower() == 'get':
-        cmd_struct.action = ct.c_int(ACTION.G4_ACTION_GET.value)
+        cmd_struct.action = ACTION.G4_ACTION_GET.value
         cmd_struct.cds.pParam = ct.cast(ct.byref(res), ct.c_void_p)
     else:
-        cmd_struct.action = ct.c_int(ACTION.G4_ACTION_RESET.value)
+        cmd_struct.action = ACTION.G4_ACTION_RESET.value
 
-    cmd_struct.cds.iParam = (POSORI.G4_TYPE_CM.value << 16 | POSORI.G4_TYPE_EULER_DEGREE.value)
+    cmd_struct.cds.iParam = (UNITS.G4_TYPE_CM.value << 16 | UNITS.G4_TYPE_EULER_DEGREE.value)
     status = G4Track.g4_set_query(ct.byref(cmd_struct))
 
-    if status > 0x7FFFFFFF:
+    if status > 0:
         status = status - 0x100000000
 
     if status == ERROR.G4_ERROR_NONE.value:
-        if action == 'GET':
+        if action.lower() == 'get':
             return res
         else:
             return True
@@ -1032,8 +1089,3 @@ def block_read_write(sys_id, hub_id, action):
 
 
 "Function and struct for stylus mode possible, but not needed"
-
-#get_active_hubs(0, True)
-#get_station_map(0,0)
-#get_source_map(0)
-#increment
